@@ -34,6 +34,11 @@ import {
 } from "./lib/job-control.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
+
+// Portable write-tool denylist. Grok sandbox apply() is unix-only; this
+// list is the load-bearing boundary on Windows. Keep in sync with the
+// CLI tool registry (issue #24).
+const READ_ONLY_DISALLOWED_TOOLS = "search_replace,write,edit,notebook_edit";
 import {
   claimJobTerminal,
   generateJobId,
@@ -329,10 +334,12 @@ async function executeReviewRun(request) {
     prompt,
     agent: "explore",
     // Headless runs have no user to click Approve, so "plan" mode with no
-    // approver can hang or fail on any tool call. `sandbox: "read-only"` is
-    // the actual safety boundary here, so auto-approving within it is safe.
+    // approver can hang or fail on any tool call. Sandbox enforcement is
+    // Unix-only (Landlock/Seatbelt); on Windows `--sandbox read-only` is a
+    // no-op. `--disallowed-tools` is the portable write boundary (issue #24).
     alwaysApprove: true,
     sandbox: "read-only",
+    disallowedTools: READ_ONLY_DISALLOWED_TOOLS,
     model: request.model,
     effort: request.effort,
     outputFormat: structured ? "json" : "plain",
@@ -447,12 +454,14 @@ async function executeTaskRun(request) {
     resumeSessionId,
     model: request.model,
     effort: request.effort,
-    // Headless runs have no user to click Approve, so a read-only run using
-    // "plan" mode with no approver can hang or fail on any tool call.
-    // `sandbox: "read-only"` is the actual safety boundary, so auto-approve
-    // is safe in both the write and read-only cases here.
+    // Headless runs have no user to click Approve. Sandbox is Unix-only;
+    // on Windows pair auto-approve with --disallowed-tools when read-only
+    // (issue #24). Write mode still auto-approves because the user asked
+    // for writes.
     alwaysApprove: true,
     sandbox: write ? undefined : "read-only",
+    disallowedTools: write ? undefined : READ_ONLY_DISALLOWED_TOOLS,
+    promptFile: request.promptFile,
     outputFormat: "plain",
     onProgress: request.onProgress
   });
@@ -547,12 +556,13 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
+function buildTaskRequest({ cwd, model, effort, prompt, promptFile, write, resumeLast, jobId }) {
   return {
     cwd,
     model,
     effort,
     prompt,
+    promptFile,
     write,
     resumeLast,
     jobId
@@ -747,6 +757,9 @@ async function handleTask(argv) {
   const model = options.model ? String(options.model).trim() : null;
   const effort = normalizeReasoningEffort(options.effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
+  const promptFile = options["prompt-file"]
+    ? path.resolve(cwd, String(options["prompt-file"]))
+    : undefined;
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
   const fresh = Boolean(options.fresh);
@@ -771,6 +784,7 @@ async function handleTask(argv) {
         model,
         effort,
         prompt,
+        promptFile,
         write,
         resumeLast,
         jobId: job.id
@@ -790,6 +804,7 @@ async function handleTask(argv) {
         model,
         effort,
         prompt,
+        promptFile,
         write,
         resumeLast,
         jobId: job.id,
@@ -1094,8 +1109,17 @@ async function main() {
   }
 }
 
+function resolveEntrypoint(candidate) {
+  try {
+    return fs.realpathSync(candidate);
+  } catch {
+    return path.resolve(candidate);
+  }
+}
+
 const isMain =
-  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  process.argv[1] &&
+  resolveEntrypoint(process.argv[1]) === resolveEntrypoint(fileURLToPath(import.meta.url));
 
 if (isMain) {
   main().catch((error) => {

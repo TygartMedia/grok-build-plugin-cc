@@ -163,7 +163,11 @@ function buildHeadlessArgs(prompt, options = {}) {
     args.push("--session-id", options.sessionId);
   }
 
-  args.push("-p", prompt);
+  if (options.promptFile) {
+    args.push("--prompt-file", options.promptFile);
+  } else {
+    args.push("-p", prompt);
+  }
 
   if (options.cwd) {
     args.push("--cwd", options.cwd);
@@ -176,6 +180,9 @@ function buildHeadlessArgs(prompt, options = {}) {
   }
   if (options.sandbox) {
     args.push("--sandbox", options.sandbox);
+  }
+  if (options.disallowedTools) {
+    args.push("--disallowed-tools", options.disallowedTools);
   }
   if (options.alwaysApprove) {
     args.push("--always-approve");
@@ -203,7 +210,7 @@ function buildHeadlessArgs(prompt, options = {}) {
 export function runHeadlessAgent(cwd, options = {}) {
   const binary = options.binary ?? resolveGrokBinary(options.env ?? process.env);
   const prompt = String(options.prompt ?? "").trim() || options.defaultPrompt || "";
-  if (!prompt) {
+  if (!prompt && !options.promptFile) {
     return Promise.reject(new Error("A prompt is required for this Grok run."));
   }
 
@@ -219,15 +226,29 @@ export function runHeadlessAgent(cwd, options = {}) {
 
   const platform = options.platform ?? process.platform;
   const detached = options.detached ?? platform !== "win32";
+  // Prefer `node grok.js` over `cmd /c grok.cmd` so prompt argv is not
+  // re-parsed by cmd.exe (issue #20 / #14).
+  const cmdShim = platform === "win32" && /\.cmd$/i.test(String(binary));
+  const jsSibling = cmdShim ? String(binary).replace(/\.cmd$/i, ".js") : "";
+  const useNodeShim = cmdShim && jsSibling && fs.existsSync(jsSibling);
 
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, {
-      cwd,
-      env: options.env ?? process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      detached,
-      windowsHide: true
-    });
+    const child = useNodeShim
+      ? spawn(process.execPath, [jsSibling, ...args], {
+          cwd,
+          env: options.env ?? process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+          detached,
+          windowsHide: true
+        })
+      : spawn(binary, args, {
+          cwd,
+          env: options.env ?? process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+          detached,
+          shell: cmdShim,
+          windowsHide: true
+        });
 
     const agentPid = child.pid ?? null;
     emitProgress(options.onProgress, `Running grok (${binary}).`, "starting", {
