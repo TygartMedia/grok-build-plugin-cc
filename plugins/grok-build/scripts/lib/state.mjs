@@ -158,6 +158,17 @@ function upsertJobInState(state, jobPatch) {
   };
 }
 
+/** Kill only if stop owns cancel, or the job is already cancelled. */
+export function cancelClaimAllowsKill(claim) {
+  if (!claim) {
+    return false;
+  }
+  if (claim.claimed) {
+    return true;
+  }
+  return claim.status === "cancelled" || !claim.status;
+}
+
 /** Claim terminal status for job file + index under one lock. cancelled wins. */
 export function claimJobTerminal(cwd, jobId, nextStatus, patch = {}) {
   if (!isTerminalJobStatus(nextStatus)) {

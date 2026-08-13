@@ -34,12 +34,8 @@ import {
 } from "./lib/job-control.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
-
-// Portable write-tool denylist. Grok sandbox apply() is unix-only; this
-// list is the load-bearing boundary on Windows. Keep in sync with the
-// CLI tool registry (issue #24).
-const READ_ONLY_DISALLOWED_TOOLS = "search_replace,write,edit,notebook_edit";
 import {
+  cancelClaimAllowsKill,
   claimJobTerminal,
   generateJobId,
   listJobs,
@@ -75,6 +71,10 @@ const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json"
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
+// Portable write-tool denylist. Grok sandbox apply() is unix-only; this
+// list is the load-bearing boundary on Windows. Keep in sync with the
+// CLI tool registry (issue #24).
+const READ_ONLY_DISALLOWED_TOOLS = "search_replace,write,edit,notebook_edit";
 
 function printUsage() {
   console.log(
@@ -1007,15 +1007,15 @@ async function handleCancel(argv) {
     logFile: existing.logFile ?? job.logFile ?? null
   });
 
-  const killResult = terminateJobProcessTrees(preClaimRecord);
-
-  if (!claim.claimed && claim.status && claim.status !== "cancelled") {
+  // Issue #3: do not signal pre-claim PIDs when the job already completed.
+  // Those PIDs may have been reused.
+  if (!cancelClaimAllowsKill(claim)) {
     const payload = {
       jobId: job.id,
       status: claim.status,
       title: claim.job?.title ?? job.title,
-      killAttempted: killResult.attempted,
-      killDelivered: killResult.delivered,
+      killAttempted: false,
+      killDelivered: false,
       alreadyTerminal: true,
       claimOrder: "claim-before-kill",
       killTargets
@@ -1027,6 +1027,8 @@ async function handleCancel(argv) {
     );
     return;
   }
+
+  const killResult = terminateJobProcessTrees(preClaimRecord);
 
   appendLogLine(
     existing.logFile ?? job.logFile,
